@@ -138,7 +138,7 @@ class LayerEqualityMeasurer(Callback):
         
     def collect(self):
         filename="data/{}.json".format(self.purpose)
-        if True or not os.path.exists(filename):
+        if not os.path.exists(filename):
             self.trainModel()
     def save(self):
         with open("data/{}.json".format(self.purpose),"w") as fp:
