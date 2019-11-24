@@ -23,7 +23,7 @@ def calDistance(x,y):
     
 class LayerEqualityMeasurer(Callback):
     
-    def __init__(self,purpose,trainDs,testDs,modelname,epochs=100,lr=0.0001):
+    def __init__(self,purpose,trainDs,testDs,modelname,epochs=100,lr=0.0001,showRand=False):
         def forceDir(path):
             if not os.path.exists(path):
                 os.mkdir(path)
@@ -32,9 +32,12 @@ class LayerEqualityMeasurer(Callback):
         self.trainDs=trainDs 
         self.testDs=testDs
         self.epochs=epochs
+        self.depth=5
+        self.period=epochs//5
         self.modelname=modelname
         self.inputShape=self.trainDs[0][0].shape
         self.lr=lr
+        self.showRand=showRand
         print("input shape",self.inputShape)
         
         forceDir("output")
@@ -46,6 +49,7 @@ class LayerEqualityMeasurer(Callback):
         
     def on_epoch_end(self,epoch,logs=None):
         #return
+        if epoch%self.period!=0: return
         curWeight=self.getWeightAsDict(self.model)
         stats={}
         for name,w in curWeight.items():
@@ -67,9 +71,13 @@ class LayerEqualityMeasurer(Callback):
         if self.modelname=="mobilenetv2":  
             if len(self.inputShape)==2:
                 x=Reshape(self.inputShape+(1,))(input)
+            else:
+                x=input
             basemodel=ka.mobilenet_v2.MobileNetV2(weights=None,include_top=False,input_tensor=x,classes=10) 
             #input=basemodel.input
-            x=basemodel.layers[-3].output
+            #print(basemodel.layers[(-15-6-6-6-6)*2-1].name)
+            #exit()
+            x=basemodel.get_layer("block_5_add").output
             #xGlobalAveragePooling2D
             '''x=Reshape((28,28,1))(input)
             x=Conv2D(32,(3,3),padding="same", activation='relu')(x)
@@ -95,18 +103,20 @@ class LayerEqualityMeasurer(Callback):
         model=Model(input,x)
         
         model.compile(loss='categorical_crossentropy',
-                    optimizer=keras.optimizers.SGD(momentum=0.9,lr=self.lr), #keras.optimizers.Adam(),
+                    optimizer=keras.optimizers.SGD(momentum=0.9,lr=0.00001), #keras.optimizers.Adam(),
                     metrics=['acc'])
         return model
                      
     def getWeightAsDict(self,model):
-        ans=[]
+        
         def allNode(model):
+            ans=[]
             if isinstance(model,Model):
                 for l in model.layers:
                     ans.extend(allNode(l))
             else:
-                return [model]
+                if isinstance(model,Conv2D) or isinstance(model,Dense) or isinstance(model,DepthwiseConv2D):
+                    ans.append(model)
             return ans
                 
         return {l.name:l.get_weights() for l in allNode(model) if "input" not in l.name and "reshape" not in l.name}
@@ -118,23 +128,27 @@ class LayerEqualityMeasurer(Callback):
         self.model=model=self.createModel()
         args={}
         args["validation_data"]=self.testDs
-        res=model.fit(*self.trainDs,batch_size=128,epochs=self.epochs,callbacks=[self],**args)
+        res=model.fit(*self.trainDs,batch_size=128,epochs=self.epochs+1,callbacks=[self],**args)
         return model
     
     def eval(self):
         return self.model.evaluate(*self.testDs,verbose=0)        
     
     def plot(self,name,ax):
-        for level in self.stats[0].keys():
+        dashs=[[1,0],[20,20],[40,40],[80,80]]
+        mak=["^","o","."]
+        for i,level in enumerate(self.stats[0].keys()):
+            #lname=level #int(level.replace("layer_",""))
+            #if int(level) % 10!=0: continue
             x,y=[],[]
-            period=len(self.stats)//10
+            period=self.epochs//len(self.stats)
             for ep,stat in enumerate(self.stats): 
-                if ep % period!=0: continue
-                _,acc=stat[level][name]
+                #if ep % period!=0: continue
+                loss,acc=stat[level][name]
                 _,tacc=stat[level]["trained"]
-                x.append(ep)
+                x.append(ep*period)
                 y.append(acc/tacc)
-            ax.plot(x,y,label="re-"+name+" "+level)
+            ax.plot(x,y,label="re-"+name+" "+level,marker=mak[i%3])
         
     def collect(self):
         filename="data/{}.json".format(self.purpose)
@@ -148,27 +162,34 @@ class LayerEqualityMeasurer(Callback):
         with open("data/{}.json".format(self.purpose),"r") as fp:
             self.stats=json.load(fp)
         
-        fig,(ax1)=plt.subplots(nrows=1,ncols=1)
+        fig,(ax1)=plt.subplots(nrows=1,ncols=1,figsize=(12,12))
         self.plot("init",ax1)
-        self.plot("rand",ax1)
+        if self.showRand:
+            self.plot("rand",ax1)
         ax1.set_ylabel("robustness")
         ax1.set_xlabel("ep")        
-        ax1.legend(loc="center right",fontsize="small")
+        ax1.legend(loc=0,fontsize="small")
+        #ax2.legend()
         ax1.set_ylim(0,1)        
+        #ax1.title("layer robustness [256,256,256,10] on MNIST")
+        #ax2.set_ylim(0,1)
+        
         fig.savefig("output/{}.png".format(self.purpose))
 
-def experiment(modelname="dense256x3",dsname="mnist",epochs=30,lr=0.0001):
+def experiment(modelname="dense256x3",dsname="mnist",epochs=30,lr=0.0001,show_rand=False):
     """ run experiment
-    :param modelname: dense256x3|dense256x5|mobilenetv2
-    :param dsname: mnist
+    :param modelname: dense256x3|dense256x5
+    :param dsname: mnist|cifar10
     """
 
     if dsname=="mnist":
         (trainX,trainY),(testX,testY)=keras.datasets.mnist.load_data()
+    elif dsname=="cifar10":
+        (trainX,trainY),(testX,testY)=keras.datasets.cifar10.load_data()
     else:
         raise ValueError("undefine dsname {}".format(dsname))
     trainY,testY = [keras.utils.to_categorical(y, 10) for y in [trainY,testY]]
-    leMea=LayerEqualityMeasurer("{}-{}-{}ep".format(modelname,dsname,epochs),(trainX,trainY),(testX,testY),modelname,epochs=epochs,lr=lr)
+    leMea=LayerEqualityMeasurer("{}-{}-{}ep".format(modelname,dsname,epochs),(trainX,trainY),(testX,testY),modelname,epochs=epochs,showRand=show_rand)
     leMea.collect()
     leMea.viz()
 
