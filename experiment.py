@@ -38,13 +38,14 @@ class LayerEqualityMeasurer(Callback):
         self.inputShape=self.trainDs[0][0].shape
         self.lr=lr
         self.showRand=showRand
+        self.monitor="val_acc"
         print("input shape",self.inputShape)
         
         forceDir("output")
         forceDir("data")
 
     def on_train_begin(self,*argv,**kargv):
-        self.initWeight=self.getWeightAsDict(self.model)
+        self.initWeight=self.getWeightAsDict(self.model)        
         self.stats=[]
         
     def on_epoch_end(self,epoch,logs=None):
@@ -54,7 +55,7 @@ class LayerEqualityMeasurer(Callback):
         stats={}
         for name,w in curWeight.items():
             level=name # int(name.replace("layer_",""))
-            stat=[logs.get("val_loss"),logs.get("val_acc")]
+            stat=[logs.get("val_loss"),logs.get(self.monitor)]
             initW=self.initWeight[name]
             ans={"trained":stat,"dist":calDistance(w,initW)}
             self.setWeight(name,self.initWeight[name])
@@ -68,7 +69,20 @@ class LayerEqualityMeasurer(Callback):
     
     def createModel(self):
         input=Input(shape=self.inputShape)
-        if self.modelname=="mobilenetv2":  
+        if self.modelname=="ae":
+            import autoencoder
+            x=self.trainDs[0].reshape((-1,28,28,1))
+            x2=self.testDs[0].reshape((-1,28,28,1))
+            x=x/255
+            x2=x2/255
+            def acc(y_true,y_pred):
+                return 1-K.mean(K.abs(y_true-y_pred))
+            self.trainDs=(x,x)
+            self.testDs=(x2,x2)
+            model,_,_=autoencoder.autoencoder(self.inputShape[-1],neuron=8)
+            model.compile(loss="mse",optimizer="adam",metrics=[acc])
+            return model
+        elif self.modelname=="mobilenetv2":  
             if len(self.inputShape)==2:
                 x=Reshape(self.inputShape+(1,))(input)
             else:
@@ -119,10 +133,22 @@ class LayerEqualityMeasurer(Callback):
                     ans.append(model)
             return ans
                 
-        return {l.name:l.get_weights() for l in allNode(model) if "input" not in l.name and "reshape" not in l.name}
+        return {l.name:l.get_weights() for l in allNode(model)}
 
     def setWeight(self,name,w):
-        self.model.get_layer(name).set_weights(w)
+        
+        def allNode(model):
+            ans=[]
+            if isinstance(model,Model):
+                for l in model.layers:
+                    ans.extend(allNode(l))
+            else:
+                if isinstance(model,Conv2D) or isinstance(model,Dense) or isinstance(model,DepthwiseConv2D):
+                    ans.append(model)
+            return ans
+        ll=allNode(self.model)
+        [l for l in ll if l.name==name][0].set_weights(w)
+        #self.model.get_layer(name).set_weights(w)
         
     def trainModel(self):
         self.model=model=self.createModel()
